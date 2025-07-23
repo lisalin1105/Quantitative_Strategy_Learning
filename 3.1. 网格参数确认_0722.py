@@ -101,21 +101,49 @@ class GridParameterGenerator:
         print(f"正在分析 {symbol} 的历史数据...")
 
         try:
-            # 下载历史数据（添加auto_adjust=False以消除FutureWarning）
+            # 下载历史数据
             data = yf.download(symbol, period=period, auto_adjust=False)
 
             if data.empty:
                 raise ValueError(f"无法获取 {symbol} 的历史数据")
 
+            # 检查是否为多索引DataFrame（处理yfinance的特殊返回格式）
+            if isinstance(data.columns, pd.MultiIndex):
+                # 如果是多索引，尝试获取第一个股票的数据
+                print("检测到多索引DataFrame，提取第一个股票数据")
+                data = data.xs(symbol, level=1, axis=1, drop_level=True)
+
             # 计算关键指标
             close_prices = data['Close']
+            print(f"数据长度: {len(close_prices)} 天")
 
             # 波动率（年化）
             volatility = close_prices.pct_change().std() * np.sqrt(252)
 
-            # 趋势强度（最后30天与90天价格变化率）
-            trend_strength = (close_prices.iloc[-1] / close_prices.iloc[-30] - 1) / \
-                             (close_prices.iloc[-1] / close_prices.iloc[-90] - 1)
+            # 趋势强度（确保获取标量值）
+            max_period = len(close_prices) - 1
+            if max_period < 1:
+                trend_strength = 1.0  # 没有足够数据点
+            else:
+                # 根据数据长度选择合适的周期
+                short_period = min(30, max_period)
+                long_period = min(90, max_period)
+
+                # 使用pct_change计算变化率，并确保获取标量值
+                change_short = close_prices.pct_change(short_period).iloc[-1]
+                change_long = close_prices.pct_change(long_period).iloc[-1]
+
+                # 如果仍然是Series，提取第一个值
+                if isinstance(change_short, pd.Series):
+                    change_short = change_short.iloc[0]
+                if isinstance(change_long, pd.Series):
+                    change_long = change_long.iloc[0]
+
+                # 处理NaN和除零情况
+                if pd.notna(change_short) and pd.notna(change_long) and change_long != -1:
+                    trend_strength = (change_short + 1) / (change_long + 1)
+                else:
+                    trend_strength = 1.0
 
             # 价格范围
             price_range = (close_prices.min(), close_prices.max())
@@ -124,6 +152,14 @@ class GridParameterGenerator:
             # 交易量特征
             volume_avg = data['Volume'].mean()
             volume_volatility = data['Volume'].pct_change().std()
+
+            # 打印关键指标，便于调试
+            print(f"{symbol} 关键指标:")
+            print(f"  - 波动率: {volatility:.4f}")
+            print(f"  - 趋势强度: {trend_strength:.4f}")
+            print(f"  - 平均价格: {avg_price:.2f}")
+            print(f"  - 价格范围: {price_range[0]:.2f} - {price_range[1]:.2f}")
+            print(f"  - 价格波动幅度: {(price_range[1] / price_range[0] - 1) * 100:.2f}%")
 
             # 确保所有计算结果都是标量
             return {
@@ -156,7 +192,15 @@ class GridParameterGenerator:
         if not stock_analysis:
             return {}
 
-        # 基础参数映射表
+        # 获取关键指标
+        volatility = stock_analysis["volatility"]
+        trend_strength = stock_analysis["trend_strength"]
+        avg_price = stock_analysis["avg_price"]
+        price_range = stock_analysis["price_range"]
+        price_spread = price_range[1] - price_range[0]
+        price_spread_pct = price_spread / avg_price if avg_price > 0 else 0
+
+        # 基础参数
         base_params = {
             "grid_lines": 10,
             "grid_range": 0.20,
@@ -165,37 +209,44 @@ class GridParameterGenerator:
             "max_positions": 5
         }
 
-        # 根据波动率调整
-        volatility = stock_analysis["volatility"]
+        # 1. 根据波动率调整网格参数（核心逻辑）
+        # 使用线性插值计算更精细的参数
+        # 波动率越高，网格线越少，网格范围越大
+        base_params["grid_lines"] = max(4, min(20, int(round(16 - 30 * volatility))))
+        base_params["grid_range"] = max(0.1, min(0.6, 0.15 + 1.2 * volatility))
 
-        if volatility < 0.15:  # 低波动
-            base_params["grid_lines"] = 8
-            base_params["grid_range"] = 0.15
-            base_params["rebalance_period"] = 30
-        elif volatility < 0.3:  # 中等波动
-            base_params["grid_lines"] = 12
-            base_params["grid_range"] = 0.25
-        else:  # 高波动
-            base_params["grid_lines"] = 16
-            base_params["grid_range"] = 0.35
-            base_params["rebalance_period"] = 15
-            base_params["position_size"] = 0.08
+        # 2. 根据趋势强度调整
+        # 强趋势: 扩大网格范围，增加最大持仓
+        if abs(trend_strength - 1) > 0.5:  # 强趋势
+            base_params["grid_range"] *= 1.2
+            base_params["max_positions"] = min(10, base_params["max_positions"] + 2)
 
-        # 根据趋势强度调整
-        trend_strength = stock_analysis["trend_strength"]
+        # 3. 根据价格波动幅度调整
+        # 波动幅度大: 增加网格线数量
+        if price_spread_pct > 0.5:
+            base_params["grid_lines"] = min(20, base_params["grid_lines"] + 4)
+        elif price_spread_pct < 0.2:
+            base_params["grid_lines"] = max(4, base_params["grid_lines"] - 2)
 
-        if abs(trend_strength) > 1.5:  # 强趋势
-            base_params["grid_range"] *= 1.2  # 扩大网格范围
-            base_params["max_positions"] = 7  # 增加最大持仓
+        # 4. 根据价格水平调整
+        # 高价股: 减少单笔资金，增加再平衡周期
+        if avg_price > 200:
+            base_params["position_size"] *= 0.6
+            base_params["rebalance_period"] = min(60, base_params["rebalance_period"] + 5)
+        elif avg_price > 100:
+            base_params["position_size"] *= 0.8
+        elif avg_price < 10:
+            base_params["position_size"] *= 1.5
+            base_params["rebalance_period"] = max(5, base_params["rebalance_period"] - 5)
 
-        # 根据平均价格调整每次交易的资金量
-        avg_price = stock_analysis["avg_price"]
+        # 5. 确保参数在合理范围内
+        base_params["grid_lines"] = max(4, min(20, base_params["grid_lines"]))
+        base_params["grid_range"] = round(max(0.1, min(0.6, base_params["grid_range"])), 2)
+        base_params["position_size"] = round(max(0.02, min(0.2, base_params["position_size"])), 3)
+        base_params["rebalance_period"] = max(5, min(60, base_params["rebalance_period"]))
+        base_params["max_positions"] = max(2, min(10, base_params["max_positions"]))
 
-        if avg_price > 100:  # 高价股
-            base_params["position_size"] *= 0.7  # 减少单笔资金
-        elif avg_price < 10:  # 低价股
-            base_params["position_size"] *= 1.3  # 增加单笔资金
-
+        print(f"生成参数: {base_params}")
         return base_params
 
     def run(self, symbol: str, period: str = "1y", save: bool = True) -> Tuple[Dict, Dict]:
@@ -240,7 +291,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"生成TSLA参数时出错: {e}")
 
-    # 为AAPL生成参数（示例）
+    # 为AAPL生成参数
     try:
         aapl_analysis, aapl_params = generator.run("AAPL")
         print("\nAAPL 参数:")
@@ -248,3 +299,21 @@ if __name__ == "__main__":
             print(f"{key}: {value}")
     except Exception as e:
         print(f"生成AAPL参数时出错: {e}")
+
+    # 为MSFT生成参数
+    try:
+        msft_analysis, msft_params = generator.run("MSFT")
+        print("\nMSFT 参数:")
+        for key, value in msft_params.items():
+            print(f"{key}: {value}")
+    except Exception as e:
+        print(f"生成MSFT参数时出错: {e}")
+
+    # 为AMD生成参数
+    try:
+        amd_analysis, amd_params = generator.run("AMD")
+        print("\nAMD 参数:")
+        for key, value in amd_params.items():
+            print(f"{key}: {value}")
+    except Exception as e:
+        print(f"生成AMD参数时出错: {e}")

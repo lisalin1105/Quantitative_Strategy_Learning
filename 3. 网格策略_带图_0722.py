@@ -267,7 +267,8 @@ def plot_grid_trading_result(data, trades_log, daily_values, symbol):
 
 
 def run_grid_trading_backtest(symbol='AAPL', start_date='2020-01-01', end_date='2024-01-01',
-                              initial_cash=10000, grid_lines=10, grid_range=0.15):
+                              initial_cash=10000, grid_lines=10, grid_range=0.15,
+                              position_size=0.1, rebalance_period=20, max_positions=5):
     """
     运行网格交易回测
 
@@ -278,12 +279,16 @@ def run_grid_trading_backtest(symbol='AAPL', start_date='2020-01-01', end_date='
     initial_cash: 初始资金
     grid_lines: 网格线数量
     grid_range: 网格范围
+    position_size: 每次交易的仓位大小（相对于总资金）
+    rebalance_period: 重新平衡网格的周期（交易日）
+    max_positions: 最大持仓数量
     """
 
     print(f"开始回测 {symbol} 网格交易策略")
     print(f"回测期间: {start_date} 至 {end_date}")
     print(f"初始资金: ${initial_cash}")
     print(f"网格设置: {grid_lines} 条网格线，范围 ±{grid_range * 100}%")
+    print(f"仓位大小: {position_size * 100}%，最大持仓: {max_positions}，重平衡周期: {rebalance_period}天")
     print("-" * 50)
 
     # 1. 下载股票数据
@@ -392,10 +397,13 @@ def run_grid_trading_backtest(symbol='AAPL', start_date='2020-01-01', end_date='
     )
     cerebro.adddata(data_feed)
 
-    # 添加策略
+    # 添加策略（传递参数）
     cerebro.addstrategy(GridTradingStrategy,
                         grid_lines=grid_lines,
-                        grid_range=grid_range)
+                        grid_range=grid_range,
+                        position_size=position_size,
+                        rebalance_period=rebalance_period,
+                        max_positions=max_positions)
 
     # 添加分析器
     cerebro.addanalyzer(GridTradingAnalyzer, _name='grid_analyzer')
@@ -462,14 +470,17 @@ def run_grid_trading_backtest(symbol='AAPL', start_date='2020-01-01', end_date='
 
 # 示例用法
 if __name__ == '__main__':
-    # 回测苹果股票的网格交易策略
+    # 回测特斯拉股票的网格交易策略
     result = run_grid_trading_backtest(
-        symbol='NVDA',  # 苹果股票
+        symbol='TSLA',  # 特斯拉股票
         start_date='2024-01-01',  # 开始日期
         end_date='2025-07-22',  # 结束日期
         initial_cash=10000,  # 初始资金1万美元
-        grid_lines=10,  # 10条网格线，把max-min range设置x条线
-        grid_range=0.15  # 网格范围，监控的max&min
+        grid_lines=8,  # 8条网格线
+        grid_range=0.6,  # 网格范围，±60%
+        position_size=0.2,  # 每次交易6%的资金
+        rebalance_period=25,  # 25天重平衡一次
+        max_positions=5  # 最大持仓5次
     )
 
     # 也可以尝试其他股票和参数
@@ -477,22 +488,26 @@ if __name__ == '__main__':
     print("尝试不同参数的回测")
     print("=" * 50)
 
-    # 回测特斯拉，使用更密集的网格
+    # 回测苹果，使用不同的参数
     result2 = run_grid_trading_backtest(
-        symbol='512890.SS',  # 特斯拉股票
+        symbol='AAPL',  # 苹果股票
         start_date='2024-01-01',  # 开始日期
         end_date='2025-07-22',  # 结束日期
         initial_cash=10000,
-        grid_lines=15,  #10条网格线，把(max-min)range设置x条线
-        grid_range=0.25  # 网格范围，监控的max&min
+        grid_lines=6,  # 6条网格线
+        grid_range=0.53,  # 网格范围，±53%
+        position_size=0.2,  # 每次交易6%的资金
+        rebalance_period=25,  # 25天重平衡一次
+        max_positions=5  # 最大持仓5次
     )
 
+    # 绘制结果图表
     if result:
         plot_grid_trading_result(
             data=result['data'],
             trades_log=result['trades_log'],
             daily_values=result['daily_values'],
-            symbol='NVDA'
+            symbol='TSLA'
         )
 
     if result2:
@@ -500,5 +515,5 @@ if __name__ == '__main__':
             data=result2['data'],
             trades_log=result2['trades_log'],
             daily_values=result2['daily_values'],
-            symbol='512890.SS'
+            symbol='AAPL'
         )
